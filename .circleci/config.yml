@@ -120,7 +120,8 @@ jobs:
       - run:
           name: Run audit
           command: |
-            cd frontend 
+            cd frontend
+            npm install
             npm audit --audit-level=critical
       - notify-slack
 
@@ -134,6 +135,7 @@ jobs:
           name: Run audit
           command: |
             cd backend 
+            npm install
             npm audit --audit-level=critical
       - notify-slack
 
