@@ -1,0 +1,197 @@
+version: 2.1
+
+orbs:
+  slack: circleci/slack@4.12.0
+
+workflows:
+  default:
+    jobs:
+      - build-frontend
+      - build-backend
+      - test-frontend:
+          requires: [build-frontend]
+      - test-backend:
+          requires: [build-backend]
+      # - audit-scan-frontend:
+      #     requires: [build-frontend]
+      # - audit-scan-backend:
+      #     requires: [build-backend]
+      - deploy-infrastructure:
+          requires: [test-frontend, test-backend]
+      - configure-infrastructure:
+          requires: ["deploy-infrastructure"]
+
+node-docker-image: &node-docker-image
+   docker:
+      - image: circleci/node:13.8.0
+
+aws-docker-image: &aws-docker-image
+   docker:
+      - image: cimg/aws:2022.11
+
+ansible-docker-image: &ansible-docker-image
+   docker:
+      - image: cimg/deploy:2022.11.1
+
+commands:
+  notify-slack:
+    steps:
+      - slack/notify:
+          event: fail
+          channel: general
+          template: basic_fail_1
+
+jobs:
+  build-frontend:
+    <<: *node-docker-image
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [frontend-build]
+      - run:
+          name: Install dependancies
+          command: |
+            cd frontend
+            npm install
+      - run:
+          name: Build front-end
+          command: |
+            cd frontend
+            npm run build
+      - save_cache:
+          paths: [frontend/node_modules]
+          key: frontend-build
+      - notify-slack
+
+  build-backend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [backend-build]
+      - run:
+          name: Install dependancies
+          command: |
+            cd backend
+            npm install
+      - run:
+          name: Back-end build
+          command: |
+            cd backend 
+            npm run build
+      - save_cache:
+          paths: [backend/node_modules]
+          key: backend-build
+
+  test-frontend:
+    <<: *node-docker-image
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [frontend-build]
+      - run:
+          name: Tests
+          command: |
+            cd frontend 
+            npm run test
+      - notify-slack
+
+  test-backend:
+    docker:
+      - image: circleci/node:13.8.0
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [backend-build]
+      - run:
+          name: Tests
+          command: |
+            cd backend 
+            npm run test
+      - notify-slack
+
+  audit-scan-frontend:
+    <<: *node-docker-image
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [frontend-build]
+      - run:
+          name: Run audit
+          command: |
+            cd frontend 
+            npm audit --audit-level=critical
+      - notify-slack
+
+  audit-scan-backend:
+    <<: *node-docker-image
+    steps:
+      - checkout
+      - restore_cache:
+          keys: [backend-build]
+      - run:
+          name: Run audit
+          command: |
+            cd backend 
+            npm audit --audit-level=critical
+      - notify-slack
+
+  deploy-infrastructure:
+    <<: *aws-docker-image
+    steps:
+      - checkout
+      - run:
+          name: Ensure back-end infrastructure exists
+          command: |
+            aws cloudformation deploy \
+              --template-file .circleci/files/backend.yml \
+              --tags project=n-udapeople\
+              --stack-name udacity-backend-${CIRCLE_WORKFLOW_ID} \
+              --parameter-overrides ID=${CIRCLE_WORKFLOW_ID}
+      - run:
+          name: Ensure front-end infrastructure exist
+          command: |
+            aws cloudformation deploy \
+              --template-file .circleci/files/backend.yml \
+              --tags project=n-udapeople\
+              --stack-name udacity-backend-${CIRCLE_WORKFLOW_ID} \
+              --parameter-overrides ID=${CIRCLE_WORKFLOW_ID}
+      - run:
+          name: Add back-end ip to ansible inventory
+          command: |
+            aws ec2 describe-instances \
+              --query 'Reservations[*].Instances[*].PublicIpAddress' \
+              --output text >> .circleci/ansible/inventory.txt
+            echo `cat .circleci/ansible/inventory.txt`
+      - persist_to_workspace:
+          root: ~/
+          paths:
+          - project/.circleci/ansible/inventory.txt
+      - notify-slack
+
+  configure-infrastructure:
+    <<: *ansible-docker-image
+    steps:
+      - checkout
+      - add_ssh_keys:
+          fingerprints: ["f5:53:f8:3c:70:25:6b:3c:50:89:14:d7:5e:98:d9:53"]
+      - attach_workspace:
+          at: ~/
+      - run:
+          name: Configure server
+          command: |
+            echo ENVIRONMENT=production > backend/.env
+            echo TYPEORM_CONNECTION=postgres >> backend/.env
+            echo TYPEORM_MIGRATIONS_DIR=./src/migrations >> backend/.env
+            echo TYPEORM_ENTITIES=./src/modules/domain/**/*.entity.ts >> backend/.env
+            echo TYPEORM_MIGRATIONS=./src/migrations/*.ts >> backend/.env
+            echo TYPEORM_HOST=$TYPEORM_HOST >> "backend/.env"
+            echo TYPEORM_PORT=$TYPEORM_PORT >> "backend/.env"
+            echo TYPEORM_USERNAME=$TYPEORM_USERNAME >> "backend/.env"
+            echo TYPEORM_PASSWORD=$TYPEORM_PASSWORD >> "backend/.env"
+            echo TYPEORM_DATABASE=$TYPEORM_DATABASE >> "backend/.env" 
+            cat backend/.env
+            cd .circleci/ansible
+            ansible-playbook -i inventory.txt configure-server.yml
+      - notify-slack
