@@ -135,7 +135,7 @@ jobs:
           name: Run audit
           command: |
             cd backend 
-            npm install
+            npm audit fix --audit-level=critical --force
             npm audit --audit-level=critical
       - notify-slack
 
